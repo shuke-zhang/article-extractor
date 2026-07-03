@@ -1,12 +1,14 @@
 // ==UserScript==
 // @name         掘金文章简洁提取器
 // @namespace    http://tampermonkey.net/
-// @version      1.0.0
-// @description  提取掘金/CSDN文章正文，支持复制、保存网络图 Markdown、保存本地图 Markdown 图片包和保存 Word 文档。
+// @version      1.0.2
+// @description  提取掘金/CSDN文章正文，支持复制、保存网络图 Markdown、保存本地图 Markdown 图片包、保存 Word 和 PDF 文档。
 // @author       You
 // @match        https://juejin.cn/post/*
 // @match        https://blog.csdn.net/*/article/details/*
 // @match        https://*.blog.csdn.net/article/details/*
+// @require      https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js
+// @require      https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js
 // @grant        GM_xmlhttpRequest
 // @connect      *
 // @connect      byteimg.com
@@ -58,6 +60,7 @@
           <button id="jse-md" class="jse-action" type="button">存为 MD</button>
           <button id="jse-zip" class="jse-action" type="button">MD+图片 ZIP</button>
           <button id="jse-word" class="jse-action jse-primary" type="button">存为 Word</button>
+          <button id="jse-pdf" class="jse-action" type="button">存为 PDF</button>
         </footer>
         <div id="jse-toast"></div>
       </section>
@@ -83,6 +86,7 @@
     const btnMd = root.querySelector('#jse-md')
     const btnZip = root.querySelector('#jse-zip')
     const btnWord = root.querySelector('#jse-word')
+    const btnPdf = root.querySelector('#jse-pdf')
 
     trigger.addEventListener('click', () => {
       panelOpen = !panelOpen
@@ -109,6 +113,7 @@
     btnMd.addEventListener('click', saveMarkdown)
     btnZip.addEventListener('click', saveMarkdownZip)
     btnWord.addEventListener('click', saveWord)
+    btnPdf.addEventListener('click', savePdf)
   }
 
   async function extractAndRender() {
@@ -322,6 +327,93 @@
     }
   }
 
+  async function savePdf() {
+    if (!extracted) {
+      showToast('暂无可保存内容')
+      return
+    }
+
+    const html2canvas = window.html2canvas
+    const JsPDF = window.jspdf?.jsPDF || window.jsPDF
+
+    if (!html2canvas || !JsPDF) {
+      showToast('PDF 组件加载失败')
+      return
+    }
+
+    const btn = document.querySelector('#jse-pdf')
+    const oldText = btn.textContent
+    let renderNode = null
+
+    try {
+      btn.disabled = true
+      btn.textContent = '处理图片...'
+
+      const docNode = document.createElement('article')
+      docNode.innerHTML = `<h1>${escapeHtml(extracted.title)}</h1>${extracted.html}`
+
+      await inlineImagesForWord(docNode, (done, total) => {
+        btn.textContent = total ? `处理图片 ${done}/${total}` : '生成 PDF...'
+      })
+
+      btn.textContent = '渲染 PDF...'
+      renderNode = createPdfRenderNode(docNode.innerHTML)
+      document.body.appendChild(renderNode)
+
+      await waitForImages(renderNode)
+      paginatePdfRenderNode(renderNode)
+
+      const pdf = new JsPDF({
+        orientation: 'p',
+        unit: 'mm',
+        format: 'a4',
+        compress: true,
+      })
+      const pageWidth = pdf.internal.pageSize.getWidth()
+      const pageHeight = pdf.internal.pageSize.getHeight()
+      const pages = [...renderNode.querySelectorAll('.jse-pdf-page')]
+
+      for (let i = 0; i < pages.length; i++) {
+        btn.textContent = `生成 PDF ${i + 1}/${pages.length}`
+        const canvas = await html2canvas(pages[i], {
+          backgroundColor: '#ffffff',
+          scale: 2,
+          useCORS: true,
+          allowTaint: true,
+          logging: false,
+          windowWidth: pages[i].scrollWidth,
+          windowHeight: pages[i].scrollHeight,
+        })
+
+        if (i > 0)
+          pdf.addPage()
+
+        pdf.addImage(
+          canvas.toDataURL('image/jpeg', 0.92),
+          'JPEG',
+          0,
+          0,
+          pageWidth,
+          pageHeight,
+        )
+      }
+
+      btn.textContent = '下载 PDF...'
+      pdf.save(`${safeFileName(extracted.title)}.pdf`)
+      showToast('已保存 PDF')
+    }
+    catch (err) {
+      console.error('[juejin-simple-extractor] 保存 PDF 失败', err)
+      showToast('保存 PDF 失败')
+    }
+    finally {
+      if (renderNode)
+        renderNode.remove()
+      btn.disabled = false
+      btn.textContent = oldText
+    }
+  }
+
   async function inlineImagesForWord(root, onProgress) {
     const imgs = [...root.querySelectorAll('img')]
       .map(img => ({ img, src: getImageSrc(img) }))
@@ -474,6 +566,88 @@
         <body>${bodyHtml}</body>
       </html>
     `
+  }
+
+  function createPdfRenderNode(bodyHtml) {
+    const wrapper = document.createElement('div')
+    wrapper.id = 'jse-pdf-render'
+    wrapper.innerHTML = `
+      <style>
+        #jse-pdf-render { position: fixed; left: 0; top: 0; width: 794px; background: #ffffff; color: #111827; transform: translateX(-120vw); pointer-events: none; z-index: -1; }
+        #jse-pdf-render,
+        #jse-pdf-render * { box-sizing: border-box; }
+        #jse-pdf-render .jse-pdf-source { width: 794px; padding: 52px 56px; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; font-size: 15px; line-height: 1.78; background: #ffffff; color: #111827; }
+        #jse-pdf-render .jse-pdf-page { width: 794px; height: 1123px; overflow: hidden; background: #ffffff; }
+        #jse-pdf-render .jse-pdf-page-body { width: 794px; min-height: 1123px; padding: 52px 56px; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; font-size: 15px; line-height: 1.78; background: #ffffff; color: #111827; }
+        #jse-pdf-render h1 { margin: 0 0 24px; font-size: 30px; line-height: 1.32; color: #0f172a; font-weight: 900; }
+        #jse-pdf-render h2 { margin: 28px 0 12px; font-size: 22px; line-height: 1.4; color: #0f766e; font-weight: 900; }
+        #jse-pdf-render h3 { margin: 22px 0 10px; font-size: 18px; line-height: 1.45; color: #155e75; }
+        #jse-pdf-render p { margin: 0 0 13px; }
+        #jse-pdf-render a { color: #0369a1; text-decoration: none; word-break: break-all; }
+        #jse-pdf-render img { display: block; max-width: 100%; max-height: 820px; width: auto; height: auto; margin: 14px auto 18px; object-fit: contain; break-inside: avoid; page-break-inside: avoid; }
+        #jse-pdf-render pre { overflow: hidden; white-space: pre-wrap; word-break: break-word; padding: 12px; border-radius: 6px; background: #f3f4f6; }
+        #jse-pdf-render code { font-family: Consolas, "Courier New", monospace; }
+        #jse-pdf-render blockquote { margin: 16px 0; padding: 8px 12px; border-left: 4px solid #0f766e; background: #f8fafc; color: #475569; }
+        #jse-pdf-render table { width: 100%; border-collapse: collapse; }
+        #jse-pdf-render th,
+        #jse-pdf-render td { border: 1px solid #d1d5db; padding: 6px 8px; }
+      </style>
+      <article class="jse-pdf-source">${bodyHtml}</article>
+      <div class="jse-pdf-pages"></div>
+    `
+
+    return wrapper
+  }
+
+  function paginatePdfRenderNode(root) {
+    const source = root.querySelector('.jse-pdf-source')
+    const pages = root.querySelector('.jse-pdf-pages')
+    const sourceNodes = [...source.childNodes]
+      .filter(node => node.nodeType !== Node.TEXT_NODE || node.textContent.trim())
+
+    source.style.display = 'none'
+    pages.innerHTML = ''
+
+    let page = createPdfPage()
+    let body = page.querySelector('.jse-pdf-page-body')
+    pages.appendChild(page)
+
+    sourceNodes.forEach((node) => {
+      const clone = node.cloneNode(true)
+      body.appendChild(clone)
+
+      if (body.scrollHeight > page.clientHeight && body.childNodes.length > 1) {
+        clone.remove()
+        page = createPdfPage()
+        body = page.querySelector('.jse-pdf-page-body')
+        pages.appendChild(page)
+        body.appendChild(clone)
+      }
+    })
+  }
+
+  function createPdfPage() {
+    const page = document.createElement('section')
+    const body = document.createElement('article')
+
+    page.className = 'jse-pdf-page'
+    body.className = 'jse-pdf-page-body'
+    page.appendChild(body)
+
+    return page
+  }
+
+  function waitForImages(root) {
+    const imgs = [...root.querySelectorAll('img')]
+
+    return Promise.all(imgs.map(img => (
+      img.complete
+        ? Promise.resolve()
+        : new Promise(resolve => {
+            img.onload = resolve
+            img.onerror = resolve
+          })
+    )))
   }
 
   function getArticleTitle() {
@@ -1249,7 +1423,7 @@
       #jse-footer {
         flex: 0 0 auto;
         display: grid;
-        grid-template-columns: repeat(4, minmax(0, 1fr));
+        grid-template-columns: repeat(5, minmax(0, 1fr));
         gap: 14px;
         padding: 16px;
         border-top: 1px solid rgba(148, 163, 184, .18);
@@ -1325,6 +1499,10 @@
         #jse-footer button {
           height: 42px;
           font-size: 13px;
+        }
+
+        #jse-footer {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
         }
 
         .jse-tab,
